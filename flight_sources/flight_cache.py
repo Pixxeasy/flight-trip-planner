@@ -6,7 +6,7 @@ import json
 import os
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import date as Date, datetime, time as Time
+from datetime import date as Date, datetime, time as Time, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -24,13 +24,19 @@ _NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "flight_tree_planner/flight_cache")
 _META_KEY = "meta"
 
 # Bumped when the on-disk schema changes incompatibly.
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+
+# Cached search results older than this are treated as stale and re-fetched
+# on the next access.
+_TTL = timedelta(hours=1)
 
 
 @dataclass
 class _CachedSearch:
     """Everything persisted for one (departure city, departure date)."""
 
+    # When the search ran (UTC). None means unknown -> treated as stale.
+    fetched_at: Optional[datetime] = None
     flights: list[Flight] = field(default_factory=list)
     # (origin_airport_code, destination_airport_code) -> list of
     # "visited city path" keys that made this route a dead end.
@@ -86,9 +92,24 @@ def _flight_from_dict(raw: dict) -> Flight:
     )
 
 
+def _parse_iso(value) -> Optional[datetime]:
+    """Parse an ISO timestamp. Naive values are assumed UTC; bad values are
+    treated as unknown (None)."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _cached_search_to_dict(payload: _CachedSearch) -> dict:
     return {
         "version": _SCHEMA_VERSION,
+        "fetched_at": payload.fetched_at.isoformat() if payload.fetched_at else None,
         "flights": [_flight_to_dict(f) for f in payload.flights],
         "invalid": [
             {
@@ -102,7 +123,7 @@ def _cached_search_to_dict(payload: _CachedSearch) -> dict:
 
 
 def _cached_search_from_dict(raw: dict) -> _CachedSearch:
-    payload = _CachedSearch()
+    payload = _CachedSearch(fetched_at=_parse_iso(raw.get("fetched_at")))
     for flight_raw in raw.get("flights", []):
         payload.flights.append(_flight_from_dict(flight_raw))
     for entry in raw.get("invalid", []):
@@ -130,7 +151,9 @@ class FlightCache:
         <root_dir>/<run_uuid>/<meta_uuid>.json   (run metadata)
 
     The files are plain, indented JSON, so they are readable and editable
-    by hand; unknown values are ignored on load.
+    by hand. Each entry records the UTC time it was fetched (`fetched_at`);
+    entries older than one hour are treated as stale and re-fetched on the
+    next access, so the data served is at most an hour old.
     """
 
     def __init__(
@@ -177,13 +200,19 @@ class FlightCache:
 
     # -- JSON I/O ---------------------------------------------------------
 
+    def _is_fresh(self, payload: _CachedSearch) -> bool:
+        if payload.fetched_at is None:
+            return False
+        return datetime.now(timezone.utc) - payload.fetched_at <= _TTL
+
     def _load_payload(self, path: Path) -> Optional[_CachedSearch]:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            return _cached_search_from_dict(raw)
+            payload = _cached_search_from_dict(raw)
         except Exception:
             # Missing, malformed, or stale-schema file -> treat as a cache miss.
             return None
+        return payload if self._is_fresh(payload) else None
 
     def _write(self, path: Path, payload: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -203,7 +232,7 @@ class FlightCache:
     # -- public API -------------------------------------------------------
 
     def has(self, city_code: str, depart_date: Date) -> bool:
-        return self._path(city_code, depart_date).exists()
+        return self._load_payload(self._path(city_code, depart_date)) is not None
 
     def load(self, city_code: str, depart_date: Date) -> Optional[List[Flight]]:
         payload = self._load_payload(self._path(city_code, depart_date))
@@ -215,6 +244,7 @@ class FlightCache:
         path = self._path(city_code, depart_date)
         payload = self._load_payload(path) or _CachedSearch()
         payload.flights = list(flights)
+        payload.fetched_at = datetime.now(timezone.utc)
         self._ensure_meta()
         self._write(path, _cached_search_to_dict(payload))
 

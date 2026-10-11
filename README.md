@@ -235,6 +235,10 @@ flight_cache/<run_uuid>/<entry_uuid>.json   # one (city, date) search result
 flight_cache/<run_uuid>/<meta_uuid>.json    # the trip parameters
 ```
 
+Each entry records `fetched_at` — the UTC time the search ran. Entries
+older than one hour are treated as stale and re-fetched on the next access,
+so the data served is at most an hour old.
+
 Each entry file holds the full `Flight` objects returned for that
 `(departure city, departure date)` — endpoints, `price`, airline, and
 arrival city/country — so every field round-trips (datetimes as ISO
