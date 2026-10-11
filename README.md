@@ -33,12 +33,12 @@ Running it produces two things:
     API.
   - `skyscanner.py` — `SkyscannerScraperSource`, a best-effort browser
     scraper.
-  - `flight_cache.py` — `FlightCache` (pickle checkpoints, UUID paths) and
+  - `flight_cache.py` — `FlightCache` (JSON checkpoints, UUID paths) and
     `CachingFlightSource`.
 - `airport_sources/` — the `AirportSource` interface and
   `CsvAirportSource`, which reads `airports.csv` to map IATA codes to city
   names and back.
-- `flight_cache/` — generated pickle checkpoints (created at runtime and
+- `flight_cache/` — generated JSON checkpoints (created at runtime and
   git-ignored).
 
 ## Install
@@ -219,9 +219,9 @@ best-effort scraper. Before using it, please note:
 
 ## The flight cache
 
-`CachingFlightSource` persists each `search()` result to pickle so an
+`CachingFlightSource` persists each `search()` result to JSON so an
 interrupted scrape can resume without re-fetching combinations it already
-has. The files are binary pickles — only load caches this tool generated.
+has. The files are plain, indented JSON — readable and editable by hand.
 
 No parameter text appears in any path component: both the run directory
 and each entry file are deterministic UUIDv5 values derived from their
@@ -231,15 +231,16 @@ directories. The trip parameters are stored in a metadata entry inside the
 run directory, so an opaque UUID directory can still be identified.
 
 ```text
-flight_cache/<run_uuid>/<entry_uuid>.pkl   # one (city, date) search result
-flight_cache/<run_uuid>/<meta_uuid>.pkl    # the trip parameters
+flight_cache/<run_uuid>/<entry_uuid>.json   # one (city, date) search result
+flight_cache/<run_uuid>/<meta_uuid>.json    # the trip parameters
 ```
 
 Each entry file holds the full `Flight` objects returned for that
-`(departure city, departure date)`, so every field round-trips. Branches
-that turn out to be dead ends are recorded back into the entry as
-invalidated `(origin, destination)` routes for specific visited-city
-paths, so they aren't re-explored.
+`(departure city, departure date)` — endpoints, `price`, airline, and
+arrival city/country — so every field round-trips (datetimes as ISO
+strings). Branches that turn out to be dead ends are recorded back into
+the entry as invalidated `(origin, destination)` routes for specific
+visited-city paths, so they aren't re-explored.
 
 ## Known issues
 

@@ -1,5 +1,5 @@
 This package ships interchangeable flight data sources plus an on-disk
-pickle cache,
+JSON cache,
 so you can swap the data provider without touching the tree-building logic
 at all. `flight_source.py` defines the shared `FlightSource` interface and
 the `City`, `Flight`, `FlightEndpoint`, and `Country` dataclasses.
@@ -14,7 +14,7 @@ the `City`, `Flight`, `FlightEndpoint`, and `Country` dataclasses.
                                `skyscanner.py` (and the project README)
                                first.
 
-`flight_cache.py` adds `FlightCache` (pickle files under UUID-named
+`flight_cache.py` adds `FlightCache` (readable JSON files under UUID-named
 directories, one per departure city/date) and `CachingFlightSource`, which
 wraps any source and serves repeated `search()` calls from disk.
 

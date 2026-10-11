@@ -1,12 +1,12 @@
-"""flight_cache.py — pickle checkpointing for FlightSource.search() calls."""
+"""flight_cache.py — JSON checkpointing for FlightSource.search() calls."""
 
 from __future__ import annotations
 
+import json
 import os
-import pickle
 import uuid
-from dataclasses import dataclass, field
-from datetime import date as Date, time as Time
+from dataclasses import asdict, dataclass, field
+from datetime import date as Date, datetime, time as Time
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -22,6 +22,9 @@ _NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "flight_tree_planner/flight_cache")
 # Reserved entry key for the run metadata. It is hashed to a UUID like every
 # other entry, so no path component reveals the parameters.
 _META_KEY = "meta"
+
+# Bumped when the on-disk schema changes incompatibly.
+_SCHEMA_VERSION = 1
 
 
 @dataclass
@@ -47,8 +50,74 @@ class _CacheMeta:
     latest_departure: str    # "HHMM"
 
 
+# -- JSON (de)serialisation ------------------------------------------------
+#
+# The on-disk format is plain, indented JSON so the cache is human readable.
+# Flight/FlightEndpoint stay pure DTOs; the mapping lives here.
+
+
+def _endpoint_to_dict(endpoint: FlightEndpoint) -> dict:
+    return {"airport_code": endpoint.airport_code, "time": endpoint.time.isoformat()}
+
+
+def _endpoint_from_dict(raw: dict) -> FlightEndpoint:
+    return FlightEndpoint(raw["airport_code"], datetime.fromisoformat(raw["time"]))
+
+
+def _flight_to_dict(flight: Flight) -> dict:
+    return {
+        "origin": _endpoint_to_dict(flight.origin),
+        "destination": _endpoint_to_dict(flight.destination),
+        "price": flight.price,
+        "arline": flight.arline,
+        "arrival_city": flight.arrival_city,
+        "arrival_country": flight.arrival_country,
+    }
+
+
+def _flight_from_dict(raw: dict) -> Flight:
+    return Flight(
+        _endpoint_from_dict(raw["origin"]),
+        _endpoint_from_dict(raw["destination"]),
+        raw["price"],
+        raw.get("arline", ""),
+        raw.get("arrival_city", ""),
+        raw.get("arrival_country", ""),
+    )
+
+
+def _cached_search_to_dict(payload: _CachedSearch) -> dict:
+    return {
+        "version": _SCHEMA_VERSION,
+        "flights": [_flight_to_dict(f) for f in payload.flights],
+        "invalid": [
+            {
+                "origin": origin,
+                "destination": destination,
+                "visited": [path.split(",") for path in paths],
+            }
+            for (origin, destination), paths in payload.invalid.items()
+        ],
+    }
+
+
+def _cached_search_from_dict(raw: dict) -> _CachedSearch:
+    payload = _CachedSearch()
+    for flight_raw in raw.get("flights", []):
+        payload.flights.append(_flight_from_dict(flight_raw))
+    for entry in raw.get("invalid", []):
+        paths = [",".join(path) for path in entry.get("visited", [])]
+        if paths:
+            payload.invalid[(entry["origin"], entry["destination"])] = paths
+    return payload
+
+
+def _meta_to_dict(meta: _CacheMeta) -> dict:
+    return {"version": _SCHEMA_VERSION, **asdict(meta)}
+
+
 class FlightCache:
-    """Persists raw search() results to pickle, one file per
+    """Persists raw search() results to JSON, one file per
     (departure city, departure date), so an interrupted scrape can resume
     without re-fetching combos it already has.
 
@@ -57,10 +126,11 @@ class FlightCache:
     parameters, so the same trip resolves to the same paths on every run.
 
     Layout:
-        <root_dir>/<run_uuid>/<entry_uuid>.pkl
-        <root_dir>/<run_uuid>/<meta_uuid>.pkl   (run metadata)
+        <root_dir>/<run_uuid>/<entry_uuid>.json
+        <root_dir>/<run_uuid>/<meta_uuid>.json   (run metadata)
 
-    Cache files are pickles: only load caches this tool generated.
+    The files are plain, indented JSON, so they are readable and editable
+    by hand; unknown values are ignored on load.
     """
 
     def __init__(
@@ -100,31 +170,35 @@ class FlightCache:
 
     def _path(self, city_code: str, depart_date: Date) -> Path:
         key = f"{city_code}|{depart_date.strftime('%Y-%m-%d')}"
-        return self.run_dir / f"{self._entry_uuid(key)}.pkl"
+        return self.run_dir / f"{self._entry_uuid(key)}.json"
 
     def _meta_path(self) -> Path:
-        return self.run_dir / f"{self._entry_uuid(_META_KEY)}.pkl"
+        return self.run_dir / f"{self._entry_uuid(_META_KEY)}.json"
 
-    # -- pickle I/O -------------------------------------------------------
+    # -- JSON I/O ---------------------------------------------------------
 
-    @staticmethod
-    def _read(path: Path):
+    def _load_payload(self, path: Path) -> Optional[_CachedSearch]:
         try:
-            return pickle.loads(path.read_bytes())
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return _cached_search_from_dict(raw)
         except Exception:
-            # Missing, truncated, or stale-class file -> treat as a cache miss.
+            # Missing, malformed, or stale-schema file -> treat as a cache miss.
             return None
 
-    def _write(self, path: Path, payload) -> None:
+    def _write(self, path: Path, payload: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
-        tmp.write_bytes(pickle.dumps(payload))
+        tmp.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
         os.replace(tmp, path)  # atomic on the same filesystem
 
     def _ensure_meta(self) -> None:
         path = self._meta_path()
         if not path.exists():
-            self._write(path, self._meta)
+            self._write(path, _meta_to_dict(self._meta))
 
     # -- public API -------------------------------------------------------
 
@@ -132,23 +206,21 @@ class FlightCache:
         return self._path(city_code, depart_date).exists()
 
     def load(self, city_code: str, depart_date: Date) -> Optional[List[Flight]]:
-        payload: _CachedSearch | None = self._read(self._path(city_code, depart_date))
+        payload = self._load_payload(self._path(city_code, depart_date))
         if payload is None:
             return None
         return payload.flights
 
     def save(self, city_code: str, depart_date: Date, flights: List[Flight]) -> None:
         path = self._path(city_code, depart_date)
-        payload: _CachedSearch | None = self._read(path)
-        if payload is None:
-            payload = _CachedSearch()
+        payload = self._load_payload(path) or _CachedSearch()
         payload.flights = list(flights)
         self._ensure_meta()
-        self._write(path, payload)
+        self._write(path, _cached_search_to_dict(payload))
 
     def invalidate(self, origin, destination, depart_date, visited_cities) -> None:
         path = self._path(origin, depart_date)
-        payload: _CachedSearch | None = self._read(path)
+        payload = self._load_payload(path)
         if payload is None:
             return
         # Mirror the previous behaviour: only routes that are actually in the
@@ -162,10 +234,10 @@ class FlightCache:
         key = ",".join(visited_cities)
         if key not in keys:
             keys.append(key)
-        self._write(path, payload)
+        self._write(path, _cached_search_to_dict(payload))
 
     def is_invalid(self, origin, destination, depart_date, visited_cities) -> bool:
-        payload: _CachedSearch | None = self._read(self._path(origin, depart_date))
+        payload = self._load_payload(self._path(origin, depart_date))
         if payload is None:
             return False
         return ",".join(visited_cities) in payload.invalid.get((origin, destination), [])
