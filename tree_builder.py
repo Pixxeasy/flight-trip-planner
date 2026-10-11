@@ -156,13 +156,13 @@ def _grow_children(
 
     for flight in candidate_flights:
         if flight.destination.airport_code in node.path:
-            if source.has_cache:
+            if source.has_cache():
                 source._cache.invalidate(node.city_code, origin_city, depart_date, node.path)
             continue  # trashed: would revisit a city already on this branch
 
         new_cost = node.cumulative_cost + flight.price
         if new_cost > max_total_cost:
-            if source.has_cache:
+            if source.has_cache():
                 source._cache.invalidate(node.city_code, origin_city, depart_date, node.path)
             continue  # trashed: this twig would blow the total budget
 
@@ -185,7 +185,7 @@ def _grow_children(
         )
 
     if not node.children:
-        if source.has_cache:
+        if source.has_cache():
             source._cache.invalidate(node.city_code, origin_city, depart_date, node.path)
         node.incomplete = True
 
@@ -236,7 +236,7 @@ def _attempt_return_leg(
     excluded_norm: Iterable[str]
 ) -> None:
     home_flight = None
-    if source.has_cache:
+    if source.has_cache():
         if source._cache.is_invalid(node.city_code,origin_city,depart_date,node.path):
             node.incomplete = True
             return
@@ -246,7 +246,7 @@ def _attempt_return_leg(
 
     if not home_flight:
         home_flight: Flight = source.get_home_flight(node.city_code, origin_city, depart_date, max_total_cost - node.cumulative_cost, excluded_norm)
-    if source.has_cache:
+    if source.has_cache():
         if not home_flight:
             home_flight = Flight(FlightEndpoint(node.city_code, datetime.now()), FlightEndpoint(origin_city, datetime.now()),1000,"","","")
         if not contains_flight(flights, home_flight):
@@ -258,14 +258,14 @@ def _attempt_return_leg(
 
     if home_flight.price is None or home_flight.price > price_threshold:
         node.incomplete = True
-        if source.has_cache:
+        if source.has_cache():
             source._cache.invalidate(node.city_code, origin_city, depart_date, node.path)
         return
 
     new_cost = node.cumulative_cost + home_flight.price
     if new_cost > max_total_cost:
         node.incomplete = True
-        if source.has_cache:
+        if source.has_cache():
             source._cache.invalidate(node.city_code, origin_city, depart_date, node.path)
         return
 

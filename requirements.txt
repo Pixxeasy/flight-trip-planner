@@ -1,3 +1,9 @@
-matplotlib>=3.7
-requests>=2.31   # only needed for KiwiTequilaSource
-playwright>=1.40 # only needed for SkyscannerScraperSource
+# Core CLI (main.py)
+typer>=0.12
+click>=8.1
+questionary>=2.0
+
+# Flight data sources (flight_sources/)
+requests>=2.31        # flight_source.py and KiwiTequilaSource (kiwi.py)
+patchright>=1.40      # SkyscannerScraperSource (skyscanner.py); run: patchright install chromium
+babel>=2.12           # SkyscannerScraperSource price parsing (babel.numbers)
