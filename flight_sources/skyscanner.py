@@ -114,7 +114,7 @@ class SkyscannerScraperSource(FlightSource):
             browser = self.get_browser(p)
 
             page: Page = browser.new_page()
-            page.on('load', self.on_load)
+            browser.on('load', self.on_load)
             page.goto("https://www.skyscanner.de", timeout=60_000)
             time.sleep(3)
             page.goto(url)
