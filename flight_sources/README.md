@@ -16,7 +16,9 @@ the `City`, `Flight`, `FlightEndpoint`, and `Country` dataclasses.
 
 `flight_cache.py` adds `FlightCache` (readable JSON files under UUID-named
 directories, one per departure city/date) and `CachingFlightSource`, which
-wraps any source and serves repeated `search()` calls from disk.
+wraps any source and serves repeated `search()` calls from disk. Each cache
+entry carries a `fetched_at` timestamp and is treated as stale after one
+hour.
 
 For anything beyond a quick personal test, use a real flight-search API
 instead. A good option that supports "cheapest flights from X to anywhere"
