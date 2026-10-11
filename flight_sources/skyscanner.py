@@ -19,6 +19,7 @@ challenges, IP blocking). A scraper built against their public HTML is:
 #    Read the module docstring warning above before relying on this.
 # --------------------------------------------------------------------------
 from .flight_source import FlightSource, Flight, City, Country, FlightEndpoint
+from .guarded_page import GuardedPage
 from airport_sources.csv_souce import CsvAirportSource
 from typing import List, Iterable
 from patchright.sync_api import expect, Page, TimeoutError as PlaywrightTimeoutError, Locator
@@ -45,12 +46,7 @@ class SkyscannerScraperSource(FlightSource):
     earliest_departure: int
     latest_departure: int
 
-    last_good_url: str = None
-    last_url: str = None
-
-
     BASE_URL = "https://www.skyscanner.de/transport/flights"
-    CAPTCHA_URL = re.compile(r"captcha-v2|challenge|/sorry/", re.I)
 
     def __init__(self, earliest_departure: Time, latest_departure: Time ,headless: bool = False, request_delay_s: float = 3.0, direct_flights: bool = True):
         self.headless = headless
@@ -63,24 +59,16 @@ class SkyscannerScraperSource(FlightSource):
     def set_airport_source(self, filepath: str):
         self.airport_source = CsvAirportSource(filepath)
 
-    def on_load(self,page):
-        self.check_captcha(page)
+    def _recover_from_captcha(self, page: GuardedPage, url: str) -> bool:
+        """If a captcha page is present, wait it out and return to `url`.
 
-    def check_captcha(self, page: Page):
-        
-        url = page.url
-        if not self.CAPTCHA_URL.search(url):
-            self.last_good_url = url
-            return
-
-        page.wait_for_timeout(500)
-        print("Captcha erkannt:", url)
-        page.wait_for_url(lambda u: not self.CAPTCHA_URL.search(u), timeout=0)
-        print("Captcha gelöst:", url)
-
-        page.wait_for_timeout(500)
-        if self.last_good_url and page.url != self.last_good_url:
-            page.goto(self.last_good_url)
+        Returns True when the page is usable again, False when there was
+        no captcha to begin with or it could not be cleared.
+        """
+        if not page.is_captcha():
+            return False
+        page.settle(intended_url=url)
+        return not page.is_captcha()
 
 
     def build_url(self,origin, depart_date):
@@ -113,8 +101,7 @@ class SkyscannerScraperSource(FlightSource):
         with sync_playwright() as p:
             browser = self.get_browser(p)
 
-            page: Page = browser.new_page()
-            browser.on('load', self.on_load)
+            page: GuardedPage = GuardedPage(browser.new_page())
             page.goto("https://www.skyscanner.de", timeout=60_000)
             time.sleep(3)
             page.goto(url)
@@ -123,8 +110,13 @@ class SkyscannerScraperSource(FlightSource):
             countries: list[Country] = []
             try:
                 page.get_by_test_id("place-card").first.wait_for(state="visible", timeout=10_000)
-            except:
-                return []
+            except Exception:
+                if not self._recover_from_captcha(page, url):
+                    return []
+                try:
+                    page.get_by_test_id("place-card").first.wait_for(state="visible", timeout=10_000)
+                except Exception:
+                    return []
 
             country_cards = page.get_by_test_id("place-card").all()
 
@@ -163,19 +155,30 @@ class SkyscannerScraperSource(FlightSource):
         flights.sort(key=lambda f: f.price)
         return flights[:top_n]
 
-    def search_country(self, country: Country, page: Page, browser, depart_date: date, visited_cities, price_threshold: float, excluded_cities) -> list[Flight]: 
+    def search_country(self, country: Country, page: GuardedPage, browser, depart_date: date, visited_cities, price_threshold: float, excluded_cities) -> list[Flight]: 
         page.goto(country.link, timeout=60_000)
 
         try:
                 page.get_by_test_id("place-card").first.wait_for(state="visible", timeout=10_000)
         except Exception:
-                browser.close()
-                raise RuntimeError(
-                    "No result cards found - Skyscanner's markup or "
-                    "loading behaviour has likely changed. Open the URL "
-                    "manually and inspect the DOM with devtools to find "
-                    "the current selectors."
-                )
+                if not self._recover_from_captcha(page, country.link):
+                    browser.close()
+                    raise RuntimeError(
+                        "No result cards found - Skyscanner's markup or "
+                        "loading behaviour has likely changed. Open the URL "
+                        "manually and inspect the DOM with devtools to find "
+                        "the current selectors."
+                    )
+                try:
+                    page.get_by_test_id("place-card").first.wait_for(state="visible", timeout=10_000)
+                except Exception:
+                    browser.close()
+                    raise RuntimeError(
+                        "No result cards found - Skyscanner's markup or "
+                        "loading behaviour has likely changed. Open the URL "
+                        "manually and inspect the DOM with devtools to find "
+                        "the current selectors."
+                    )
 
         cities: list[City] = []
 
@@ -217,7 +220,7 @@ class SkyscannerScraperSource(FlightSource):
         iata_codes = self.resolve_city(city_name)
         return bool(set(iata_codes) & set(visited_cities))
 
-    def search_flights(self, city: City, page: Page, browser, depart_date: date, price_threshold: float, excluded_cities: Iterable[str]) -> list[Flight]:
+    def search_flights(self, city: City, page: GuardedPage, browser, depart_date: date, price_threshold: float, excluded_cities: Iterable[str]) -> list[Flight]:
         link = city.link + f"&departure-times={self.earliest_departure}-{self.latest_departure}"
 
         page.goto(link, timeout=60_000)
@@ -227,14 +230,26 @@ class SkyscannerScraperSource(FlightSource):
         try:
             expect(page.locator(flights_found_selector).locator("span").first).to_contain_text("Ergebnis",timeout=120_000)
         except Exception as e:
-                print(e)
-                browser.close()
-                raise RuntimeError(
-                    "No result cards found - Skyscanner's markup or "
-                    "loading behaviour has likely changed. Open the URL "
-                    "manually and inspect the DOM with devtools to find "
-                    "the current selectors."
-                )
+                if not self._recover_from_captcha(page, link):
+                    print(e)
+                    browser.close()
+                    raise RuntimeError(
+                        "No result cards found - Skyscanner's markup or "
+                        "loading behaviour has likely changed. Open the URL "
+                        "manually and inspect the DOM with devtools to find "
+                        "the current selectors."
+                    )
+                try:
+                    expect(page.locator(flights_found_selector).locator("span").first).to_contain_text("Ergebnis",timeout=120_000)
+                except Exception as e:
+                    print(e)
+                    browser.close()
+                    raise RuntimeError(
+                        "No result cards found - Skyscanner's markup or "
+                        "loading behaviour has likely changed. Open the URL "
+                        "manually and inspect the DOM with devtools to find "
+                        "the current selectors."
+                    )
         time.sleep(1)
         if self.has_no_results(page):
             return flights
@@ -323,7 +338,7 @@ class SkyscannerScraperSource(FlightSource):
 
             browser = self.get_browser(p)
 
-            page: Page = browser.new_page()
+            page: GuardedPage = GuardedPage(browser.new_page())
             page.goto("https://www.skyscanner.de", timeout=60_000)
             time.sleep(3)
 
