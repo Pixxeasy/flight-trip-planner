@@ -204,7 +204,7 @@ def main(
         None, formats=TIME_FORMATS, help="Latest departure time HH:MM (default 23:59)"),
     source: Optional[Source] = typer.Option(None, help="Flight data source"),
     kiwi_api_key: Optional[str] = typer.Option(None, help="Kiwi API key (needed if --source kiwi)"),
-    output: Optional[str] = typer.Option(None, help="Output PNG path"),
+    output: Optional[str] = typer.Option(None, help="Output HTML path"),
     top_itineraries: Optional[int] = typer.Option(None, help="How many cheapest itineraries to print"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Never prompt; use defaults"),
 ):
