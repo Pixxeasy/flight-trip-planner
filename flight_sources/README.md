@@ -18,14 +18,12 @@ city/date) and `CachingFlightSource`, which wraps any source and serves
 repeated `search()` calls from disk.
 
 For anything beyond a quick personal test, use a real flight-search API
-instead. Good options that support "cheapest flights from X to anywhere"
+instead. A good option that supports "cheapest flights from X to anywhere"
 style queries:
 
   * Kiwi.com "Tequila" API      https://tequila.kiwi.com/portal/docs
                                  (free tier, has a /search "anywhere"
                                  mode - fly_to=anywhere)
-  * Amadeus Self-Service API    https://developers.amadeus.com/
-                                 (free tier, "Flight Cheapest Date Search")
 
 Current status: only SkyscannerScraperSource implements the full current
 `FlightSource` interface and can be instantiated. MockFlightSource and

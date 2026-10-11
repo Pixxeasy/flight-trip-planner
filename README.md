@@ -189,13 +189,11 @@ All sources implement the `FlightSource` interface in
 ## Switching to real flight data
 
 For anything beyond a quick personal test, prefer a real flight-search API
-over scraping. Good options that support "cheapest flights from X to
+over scraping. A good option that supports "cheapest flights from X to
 anywhere" style queries:
 
 - Kiwi.com "Tequila" API — <https://tequila.kiwi.com/portal/docs>
   (free tier, has an "anywhere" search mode).
-- Amadeus Self-Service API — <https://developers.amadeus.com/>
-  (free tier, "Flight Cheapest Date Search").
 
 ### Skyscanner scraping caveats
 
@@ -246,3 +244,8 @@ These are current limitations of the code, not of the documentation:
   implementation for abstract method 'get_home_flight'`. They also
   construct `City`/`Flight` with the pre-refactor field shapes, which no
   longer match the dataclasses in `flight_source.py`.
+- **`--output` help text** still says "Output PNG path" even though the
+  output is an HTML page.
+- **`FlightSource.has_cache`** is defined as a method but checked as a
+  truthy attribute in `tree_builder.py`, so the cache code paths are
+  always taken.
