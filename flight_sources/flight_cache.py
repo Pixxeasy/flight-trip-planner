@@ -1,24 +1,66 @@
-"""flight_cache.py — JSON checkpointing for FlightSource.search() calls."""
+"""flight_cache.py — pickle checkpointing for FlightSource.search() calls."""
 
 from __future__ import annotations
 
-import json
-from datetime import date as Date, datetime, time as Time
+import os
+import pickle
+import uuid
+from dataclasses import dataclass, field
+from datetime import date as Date, time as Time
 from pathlib import Path
-from typing import Iterable, List, Optional, Set
+from typing import Iterable, List, Optional
 
 from flight_sources.flight_source import FlightEndpoint, Flight, FlightSource
 
 
+# Fixed namespace so a given trip's parameters always map to the same run
+# directory, and a given (city, date) always maps to the same entry file -
+# without putting any parameter text in the path. Deterministic uuid5 keeps
+# resume working across runs.
+_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "flight_tree_planner/flight_cache")
+
+# Reserved entry key for the run metadata. It is hashed to a UUID like every
+# other entry, so no path component reveals the parameters.
+_META_KEY = "meta"
+
+
+@dataclass
+class _CachedSearch:
+    """Everything persisted for one (departure city, departure date)."""
+
+    flights: list[Flight] = field(default_factory=list)
+    # (origin_airport_code, destination_airport_code) -> list of
+    # "visited city path" keys that made this route a dead end.
+    invalid: dict[tuple[str, str], list[str]] = field(default_factory=dict)
+
+
+@dataclass
+class _CacheMeta:
+    """The trip parameters this cache directory belongs to, so an opaque
+    UUID directory can still be identified."""
+
+    origin: str
+    start_date: str          # ISO date
+    total_days: int
+    nights_per_city: int
+    earliest_departure: str  # "HHMM"
+    latest_departure: str    # "HHMM"
+
+
 class FlightCache:
-    """Persists raw search() results to JSON, one file per
+    """Persists raw search() results to pickle, one file per
     (departure city, departure date), so an interrupted scrape can resume
     without re-fetching combos it already has.
 
+    No parameter text appears in any path component. Both the run directory
+    and each entry file are deterministic UUIDv5 values derived from their
+    parameters, so the same trip resolves to the same paths on every run.
+
     Layout:
-        <root_dir>/<origin>_<start_date>_<total_days>d_<nights_per_city>n/
-            <depart_date>/
-                <departure_city_code>.json
+        <root_dir>/<run_uuid>/<entry_uuid>.pkl
+        <root_dir>/<run_uuid>/<meta_uuid>.pkl   (run metadata)
+
+    Cache files are pickles: only load caches this tool generated.
     """
 
     def __init__(
@@ -31,77 +73,102 @@ class FlightCache:
         latest_departure: Time,
         root_dir: str | Path = "flight_cache",
     ) -> None:
-        run_name = f"{origin}_{start_date.strftime("%Y-%m-%d")}_{total_days}d_{nights_per_city}n_{earliest_departure.strftime("%H%M")}_{latest_departure.strftime("%H%M")}"
-        self.run_dir = Path(root_dir) / run_name
+        origin_norm = origin.strip().upper()
+        param_key = "|".join([
+            origin_norm,
+            start_date.strftime("%Y-%m-%d"),
+            str(total_days),
+            str(nights_per_city),
+            earliest_departure.strftime("%H%M"),
+            latest_departure.strftime("%H%M"),
+        ])
+        self.run_uuid = uuid.uuid5(_NAMESPACE, param_key)
+        self.run_dir = Path(root_dir) / str(self.run_uuid)
+        self._meta = _CacheMeta(
+            origin=origin_norm,
+            start_date=start_date.strftime("%Y-%m-%d"),
+            total_days=total_days,
+            nights_per_city=nights_per_city,
+            earliest_departure=earliest_departure.strftime("%H%M"),
+            latest_departure=latest_departure.strftime("%H%M"),
+        )
+
+    # -- paths ------------------------------------------------------------
+
+    def _entry_uuid(self, key: str) -> uuid.UUID:
+        return uuid.uuid5(self.run_uuid, key)
 
     def _path(self, city_code: str, depart_date: Date) -> Path:
-        return self.run_dir / depart_date.strftime("%Y-%m-%d") / f"{city_code}.json"
+        key = f"{city_code}|{depart_date.strftime('%Y-%m-%d')}"
+        return self.run_dir / f"{self._entry_uuid(key)}.pkl"
+
+    def _meta_path(self) -> Path:
+        return self.run_dir / f"{self._entry_uuid(_META_KEY)}.pkl"
+
+    # -- pickle I/O -------------------------------------------------------
+
+    @staticmethod
+    def _read(path: Path):
+        try:
+            return pickle.loads(path.read_bytes())
+        except Exception:
+            # Missing, truncated, or stale-class file -> treat as a cache miss.
+            return None
+
+    def _write(self, path: Path, payload) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_bytes(pickle.dumps(payload))
+        os.replace(tmp, path)  # atomic on the same filesystem
+
+    def _ensure_meta(self) -> None:
+        path = self._meta_path()
+        if not path.exists():
+            self._write(path, self._meta)
+
+    # -- public API -------------------------------------------------------
 
     def has(self, city_code: str, depart_date: Date) -> bool:
         return self._path(city_code, depart_date).exists()
 
     def load(self, city_code: str, depart_date: Date) -> Optional[List[Flight]]:
-        path = self._path(city_code, depart_date)
-        if not path.exists():
+        payload: _CachedSearch | None = self._read(self._path(city_code, depart_date))
+        if payload is None:
             return None
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        return [_flight_from_dict(f) for f in raw]
+        return payload.flights
 
     def save(self, city_code: str, depart_date: Date, flights: List[Flight]) -> None:
         path = self._path(city_code, depart_date)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        raw = [_flight_to_dict(f) for f in flights]
-        path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+        payload: _CachedSearch | None = self._read(path)
+        if payload is None:
+            payload = _CachedSearch()
+        payload.flights = list(flights)
+        self._ensure_meta()
+        self._write(path, payload)
 
-    def invalidate(self, origin ,destination, depart_date, visited_cities) -> None :
+    def invalidate(self, origin, destination, depart_date, visited_cities) -> None:
         path = self._path(origin, depart_date)
-
-        data = json.loads(path.read_text(encoding="utf-8"))
-
-        for flight in data:
-            if flight['origin']['airport_code'] == origin and flight['destination']['airport_code'] == destination:
-                existing = flight.get('invalidFor', [])
-                existing.append(','.join(visited_cities))
-                flight["invalidFor"] = existing
-
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        payload: _CachedSearch | None = self._read(path)
+        if payload is None:
+            return
+        # Mirror the previous behaviour: only routes that are actually in the
+        # cached result can be marked invalid.
+        if not any(
+            f.origin.airport_code == origin and f.destination.airport_code == destination
+            for f in payload.flights
+        ):
+            return
+        keys = payload.invalid.setdefault((origin, destination), [])
+        key = ",".join(visited_cities)
+        if key not in keys:
+            keys.append(key)
+        self._write(path, payload)
 
     def is_invalid(self, origin, destination, depart_date, visited_cities) -> bool:
-        path = self._path(origin, depart_date)
-        if not path.exists():
+        payload: _CachedSearch | None = self._read(self._path(origin, depart_date))
+        if payload is None:
             return False
-        data = json.loads(path.read_text(encoding="utf-8"))
-        for flight in data:
-            if flight['origin']['airport_code'] == origin and flight['destination']['airport_code'] == destination:
-                existing: list[str] = flight.get('invalidFor', [])
-                return existing.__contains__(",".join(visited_cities));
-
-        return False
-
-
-def _city_to_dict(city: FlightEndpoint) -> dict:
-        return {"airport_code": city.airport_code, "time": city.time.isoformat()}
-
-
-def _city_from_dict(data: dict) -> FlightEndpoint:
-        return FlightEndpoint(airport_code=data["airport_code"], time=datetime.fromisoformat(data["time"]))
-
-
-def _flight_to_dict(flight: Flight) -> dict:
-    return {
-        "origin": _city_to_dict(flight.origin),
-        "destination": _city_to_dict(flight.destination),
-        "price": flight.price,
-}
-
-
-def _flight_from_dict(data: dict) -> Flight:
-    return Flight(
-            origin=_city_from_dict(data["origin"]),
-            destination=_city_from_dict(data["destination"]),
-            price=data["price"],
-)
-
+        return ",".join(visited_cities) in payload.invalid.get((origin, destination), [])
 
 
 class CachingFlightSource(FlightSource):

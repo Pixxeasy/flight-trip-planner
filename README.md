@@ -33,12 +33,12 @@ Running it produces two things:
     API.
   - `skyscanner.py` — `SkyscannerScraperSource`, a best-effort browser
     scraper.
-  - `flight_cache.py` — `FlightCache` (JSON checkpoints) and
+  - `flight_cache.py` — `FlightCache` (pickle checkpoints, UUID paths) and
     `CachingFlightSource`.
 - `airport_sources/` — the `AirportSource` interface and
   `CsvAirportSource`, which reads `airports.csv` to map IATA codes to city
   names and back.
-- `flight_cache/` — generated JSON checkpoints (created at runtime and
+- `flight_cache/` — generated pickle checkpoints (created at runtime and
   git-ignored).
 
 ## Install
@@ -175,7 +175,8 @@ All sources implement the `FlightSource` interface in
   lookups (backed by `airport_sources`, set via `set_airport_source()`).
 
 `build_source()` in `main.py` wraps whichever source you choose in
-`CachingFlightSource`, so repeated searches are served from the JSON cache.
+`CachingFlightSource`, so repeated searches are served from the on-disk
+cache.
 
 - **`mock`** (`MockFlightSource`) — synthetic prices from a built-in city
   directory, no network required. Intended for testing the algorithm.
@@ -218,19 +219,27 @@ best-effort scraper. Before using it, please note:
 
 ## The flight cache
 
-`CachingFlightSource` persists each `search()` result to JSON so an
+`CachingFlightSource` persists each `search()` result to pickle so an
 interrupted scrape can resume without re-fetching combinations it already
-has. Layout:
+has. The files are binary pickles — only load caches this tool generated.
+
+No parameter text appears in any path component: both the run directory
+and each entry file are deterministic UUIDv5 values derived from their
+parameters, so the same trip always maps to the same paths (and resume
+works across runs) while different parameters map to different
+directories. The trip parameters are stored in a metadata entry inside the
+run directory, so an opaque UUID directory can still be identified.
 
 ```text
-flight_cache/<origin>_<start_date>_<total_days>d_<nights_per_city>n_<earliest>_<latest>/
-    <depart_date>/
-        <departure_city_code>.json
+flight_cache/<run_uuid>/<entry_uuid>.pkl   # one (city, date) search result
+flight_cache/<run_uuid>/<meta_uuid>.pkl    # the trip parameters
 ```
 
-Each file holds a list of flights (`origin`, `destination`, `price`).
-Branches that turn out to be dead ends are recorded back into the cache as
-an `invalidFor` list of visited-city paths, so they aren't re-explored.
+Each entry file holds the full `Flight` objects returned for that
+`(departure city, departure date)`, so every field round-trips. Branches
+that turn out to be dead ends are recorded back into the entry as
+invalidated `(origin, destination)` routes for specific visited-city
+paths, so they aren't re-explored.
 
 ## Known issues
 
